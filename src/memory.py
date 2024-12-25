@@ -1,217 +1,97 @@
-from gymnasium.wrappers import TimeLimit
-from env_hiv import HIVPatient
-from evaluate import evaluate_HIV
+import random
 import torch
 import numpy as np
-from torch import nn, optim
-import os
-from memory import ReplayBuffer, PrioritizedReplayBuffer
-from copy import deepcopy
+from segment_tree import SumSegmentTree, MinSegmentTree
 
-env = TimeLimit(
-    env=HIVPatient(domain_randomization=True), max_episode_steps=200
-)  # The time wrapper limits the number of steps in an episode at 200.
-# Now is the floor is yours to implement the agent and train it.
-
-config = {
-    'learning_rate': 5e-4,
-    'gamma': 0.99,
-    'buffer_size': 1000000,
-    'epsilon_min': 0.05,
-    'epsilon_max': 1.0,
-    'decay_factor': 0.05,
-    'decay_option': 'linear',
-    'epsilon_decay_period': 10000,
-    'epsilon_delay_decay': 100,
-    'batch_size': 2048,
-    'gradient_steps': 1,
-    'update_target_strategy': 'replace',
-    'update_target_freq': 1000,
-    'hidden_dim': 1024,
-    'criterion': torch.nn.SmoothL1Loss(reduction='none'),
-    'double_dqn': True,
-    'per': True,
-    'alpha': 0.2,
-    'beta': 0.6,
-    'beta_increment_per_sampling': 5e-6,
-    'prior_eps': 1e-6
-}
-
-MODEL_PATH = "ddqn_per_model.pth"
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-class DQNModel(nn.Module):
-    def __init__(self, input_dim, output_dim, nb_neurons=1024):
-        super(DQNModel, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, nb_neurons),
-            nn.LeakyReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            nn.LeakyReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            nn.LeakyReLU(),
-            nn.Linear(nb_neurons, output_dim)
-        )
-        self.init_weights()
-
-    def init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight.data)
-                nn.init.zeros_(m.bias.data)
-
-    def forward(self, x):
-        return self.network(x)
-
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
-
-# You have to implement your own agent.
-# Don't modify the methods names and signatures, but you can add methods.
-# ENJOY!
-class ProjectAgent:
-    def __init__(self, config=None, training=False):
-        if training:
-            self.double_dqn = config.get('double_dqn', False)
-            self.per = config.get('per', False)
-            self.alpha = config.get('alpha', 0.2)
-            self.beta = config.get('beta', 0.6)
-            self.beta_increment_per_sampling = config.get('beta_increment_per_sampling', 5e-6)
-            self.prior_eps = config.get('prior_eps', 1e-6)
-            self.decay_factor = config.get('decay_factor', 1)
-            self.decay_option = config.get('decay_option', 'linear')
-            self.gamma = config.get('gamma', 0.95)
-            self.batch_size = config.get('batch_size', 100)
-            buffer_size = config.get('buffer_size', int(1e5))
-
-            if self.per:
-                self.memory = PrioritizedReplayBuffer(buffer_size, self.alpha, self.beta, self.beta_increment_per_sampling, device)
-            else:
-                self.memory = ReplayBuffer(buffer_size, device)
-
-            self.epsilon_max = config.get('epsilon_max', 1.0)
-            self.epsilon_min = config.get('epsilon_min', 0.01)
-            self.epsilon_stop = config.get('epsilon_decay_period', 1000)
-            self.epsilon_delay = config.get('epsilon_delay_decay', 20)
-            self.epsilon_step = (self.epsilon_max - self.epsilon_min) / self.epsilon_stop
-            hidden_dim = config.get('hidden_dim', 128)
-            self.model = DQNModel(env.observation_space.shape[0], env.action_space.n, nb_neurons=hidden_dim).to(device)
-            self.target_model = deepcopy(self.model).to(device)
-            self.criterion = config.get('criterion', nn.MSELoss(reduction='none'))
-            lr = config.get('learning_rate', 0.001)
-            self.optimizer = config.get('optimizer', optim.Adam(self.model.parameters(), lr=lr))
-            self.nb_gradient_steps = config.get('gradient_steps', 1)
-            self.update_target_strategy = config.get('update_target_strategy', 'replace')
-            self.update_target_freq = config.get('update_target_freq', 20)
-            self.update_target_tau = config.get('update_target_tau', 0.005)
+class ReplayBuffer:
+    def __init__(self, capacity, device):
+        self.capacity = int(capacity)
+        self.data = []
+        self.index = 0
+        self.device = device
     
-    def act(self, observation, use_random=False):
-        if use_random and np.random.rand() < self.epsilon:
-            return env.action_space.sample()
-        observation = torch.Tensor(observation).unsqueeze(0).to(device)
-        with torch.no_grad():
-            action_values = self.model(observation)
-        return action_values.argmax().item()
+    def append(self, s, a, r, s_, d):
+        if len(self.data) < self.capacity:
+            self.data.append(None)
+        self.data[self.index] = (s, a, r, s_, d)
+        self.index = (self.index + 1) % self.capacity
 
-    def gradient_step(self):
-        if len(self.memory) > self.batch_size:
-            if self.per:
-                X, A, R, Y, D, W, I = self.memory.sample(self.batch_size)
-            else:
-                X, A, R, Y, D = self.memory.sample(self.batch_size)
-
-            if not self.double_dqn:
-                QYmax = self.target_model(Y).max(1)[0].detach()
-            else:
-                QYmax = self.target_model(Y).gather(1, self.model(Y).argmax(1).unsqueeze(1)).squeeze(1)
+    def sample(self, batch_size):
+        batch = random.sample(self.data, batch_size)
+        return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
+    
+    def __len__(self):
+        return len(self.data)
+    
+class PrioritizedReplayBuffer(ReplayBuffer):
+    def __init__(self, capacity, alpha, beta, beta_increment_per_sampling, device):
+        super().__init__(capacity, device)
+        self.max_priority = 1.0
+        self.tree_ptr = 0
+        self.alpha = alpha
+        self.beta = beta
+        self.beta_increment_per_sampling = beta_increment_per_sampling
         
-            update = torch.addcmul(R, 1-D, QYmax, value=self.gamma)
-            QXA = self.model(X).gather(1, A.to(torch.long).unsqueeze(1))
-            loss_values = self.criterion(QXA, update.unsqueeze(1))
+        tree_capacity = 1
+        while tree_capacity < self.capacity:
+            tree_capacity *= 2
 
-            if self.per:
-                loss = torch.mean(loss_values * W)
-            else:
-                loss = torch.mean(loss_values)
+        self.sum_tree = SumSegmentTree(tree_capacity)
+        self.min_tree = MinSegmentTree(tree_capacity)
+        
+    def append(self, s, a, r, s_, d):
+        super().append(s, a, r, s_, d)
+        priority = self.max_priority ** self.alpha
+        self.sum_tree[self.tree_ptr] = priority
+        self.min_tree[self.tree_ptr] = priority
+        self.tree_ptr = (self.tree_ptr + 1) % self.capacity
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+    def sample(self, batch_size):
+        self.beta = np.min([1.0, self.beta + self.beta_increment_per_sampling])
+        indices = self._sample_proportional(batch_size)
+        batch = [self.data[idx] for idx in indices]
+        s, a, r, s_, d = list(zip(*batch))
+        weights = self._calculate_weights(indices, self.beta)
 
-            if self.per:
-                priorities = loss_values.squeeze().detach().cpu().numpy() + self.prior_eps
-                self.memory.update_priorities(
-                    indices=I,
-                    priorities=priorities
-                )
-
-    def train(self, max_episode=100):
-        best_score = 0
-        episode = 0
-        episode_cum_reward = 0
-        state, _ = env.reset()
-        self.epsilon = self.epsilon_max
-        step = 0
-
-        while episode < max_episode:
-            # update epsilon
-            if step > self.epsilon_delay:
-                # self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_step)
-                if self.decay_option == 'linear':
-                 self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_step)
-                elif self.decay_option == 'logistic':
-                    self.epsilon = self.epsilon_min + (self.epsilon_max - self.epsilon_min) * \
-                            sigmoid(self.decay_factor * (self.epsilon_stop - episode))
-                else:
-                    raise Exception(f"L'option {self.decay_option} n'est pas reconnue.")
-
-                
-            # select epsilon-greedy action
-            action = self.act(state, use_random=True)
-                
-            # step
-            next_state, reward, done, trunc, _ = env.step(action)
-            self.memory.append(state, action, reward, next_state, done)
-            episode_cum_reward += reward
+        return (
+            torch.Tensor(np.array(s)).to(self.device),
+            torch.Tensor(np.array(a)).to(self.device),
+            torch.Tensor(np.array(r)).to(self.device),
+            torch.Tensor(np.array(s_)).to(self.device),
+            torch.Tensor(np.array(d)).to(self.device),
+            torch.Tensor(weights).to(self.device),
+            indices
+        )
+        
+    def update_priorities(self, indices, priorities):
+        assert len(indices) == len(priorities)
+        for idx, priority in zip(indices, priorities):
+            new_priority = priority ** self.alpha
+            self.sum_tree[idx] = new_priority
+            self.min_tree[idx] = new_priority
+        self.max_priority = max(self.max_priority, np.max(priorities))
             
-            # train
-            for _ in range(self.nb_gradient_steps): 
-                self.gradient_step()
-                
-            # update target network if needed
-            if self.update_target_strategy == 'replace' and step % self.update_target_freq == 0:
-                self.target_model.load_state_dict(self.model.state_dict())
-            elif self.update_target_strategy == 'ema':
-                target_state_dict = self.target_model.state_dict()
-                model_state_dict = self.model.state_dict()
-                tau = self.update_target_tau
-                for key in model_state_dict:
-                    target_state_dict[key] = tau*model_state_dict[key] + (1-tau)*target_state_dict[key]
-                self.target_model.load_state_dict(target_state_dict)
-                
-            # next transition
-            step += 1
-            if done or trunc:
-                episode += 1
-                score = evaluate_HIV(agent=self, nb_episode=1)
-                if score > best_score:
-                    best_score = score
-                    self.save(MODEL_PATH)
-                print(
-                    f"Episode: {episode:3d}/{max_episode}, "
-                    f"Epsilon: {self.epsilon:.2f}, "
-                    f"Batch size: {len(self.memory):5d}, "
-                    f"Total reward: {episode_cum_reward:13.1f}, "
-                    f"Score: {score:13.1f}"
-                )
-                state, _ = env.reset()
-                episode_cum_reward = 0
-            else:
-                state = next_state
-    
-    def save(self, path):
-        torch.save(self.model.state_dict(), path)
+    def _sample_proportional(self, batch_size):
+        indices = np.zeros(batch_size, dtype=np.int32) 
+        p_total = self.sum_tree.sum(0, len(self) - 1)
+        segment = p_total / batch_size
 
-    def load(self):
-        self.model = DQNModel(env.observation_space.shape[0], env.action_space.n)
-        self.model.load_state_dict(torch.load(f'{os.getcwd()}/{MODEL_PATH}',  map_location=device, weights_only=True))
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            upperbound = np.random.uniform(a, b)
+            indices[i] = self.sum_tree.retrieve(upperbound)
+
+        return indices
+    
+    def _calculate_weights(self, indices, beta):
+        weights = np.zeros(len(indices), dtype=np.float32)
+        p_min = self.min_tree.query() / self.sum_tree.query()
+        max_weight = (p_min * len(self)) ** (-beta)
+
+        for i, idx in enumerate(indices):
+            p_sample = self.sum_tree[idx] / self.sum_tree.query()
+            weight = (p_sample * len(self)) ** (-beta) / max_weight        
+            weights[i] = weight
+
+        return weights
