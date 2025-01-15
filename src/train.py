@@ -156,7 +156,6 @@ class ProjectAgent:
         while episode < max_episode:
             # update epsilon
             if step > self.epsilon_delay:
-                # self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_step)
                 if self.decay_option == 'linear':
                  self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_step)
                 elif self.decay_option == 'logistic':
@@ -164,7 +163,6 @@ class ProjectAgent:
                             sigmoid(self.decay_factor * (self.epsilon_stop - episode))
                 else:
                     raise Exception(f"L'option {self.decay_option} n'est pas reconnue.")
-
                 
             # select epsilon-greedy action
             action = self.act(state, use_random=True)
